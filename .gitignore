@@ -1,0 +1,7 @@
+build/
+build_test/
+renders/
+dist/
+*.wav
+.DS_Store
+*.mp3

@@ -1,0 +1,70 @@
+name: Build WUB4
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE download
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-8.0.10-${{ runner.os }}
+
+      - name: Configure (universal arm64 + x86_64)
+        run: cmake -S . -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build VST3 + AU
+        run: cmake --build build --config Release --target WUB4_VST3 WUB4_AU -- -quiet
+
+      - name: Ad-hoc sign
+        run: |
+          cd build/WUB4_artefacts/Release
+          codesign --force --deep --sign - VST3/WUB4.vst3
+          codesign --force --deep --sign - AU/WUB4.component
+          codesign --verify --deep --verbose=2 VST3/WUB4.vst3
+
+      - name: Validate with pluginval
+        run: |
+          curl -sSL -o pluginval.zip https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_macOS.zip
+          unzip -q pluginval.zip
+          ./pluginval.app/Contents/MacOS/pluginval --strictness-level 7 --skip-gui-tests --validate-in-process \
+            --validate build/WUB4_artefacts/Release/VST3/WUB4.vst3
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cd build/WUB4_artefacts/Release
+          ditto -c -k --keepParent VST3/WUB4.vst3 ../../../dist/WUB4-VST3-macOS.zip
+          ditto -c -k --keepParent AU/WUB4.component ../../../dist/WUB4-AU-macOS.zip
+          cd ../../..
+          cp scripts/install-mac.command dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WUB4-macOS
+          path: dist/*
+
+      - name: Release (on tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+  dsp-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render every preset offline and check for NaNs / silence
+        run: |
+          g++ -std=c++17 -O2 tools/render_test.cpp -o render_test
+          mkdir -p renders && ./render_test renders | tee render.txt
+          ! awk 'NR>1 && ($NF!=0 || $(NF-3)<0.05)' render.txt | grep .
